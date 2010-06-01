@@ -1,9 +1,11 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 u"""
 # -*- coding: utf-8 -*-
 (c) 2009 Ryszard Szopa <ryszard.szopa@gmail.com>
+(c) 2010 Mahmoud Abdelkader <mahmoud@linux.com>
 
-This work ‘as-is’ we provide.
+This work 'as-is' we provide.
 No warranty, express or implied.
 We’ve done our best,
 to debug and test.
@@ -17,13 +19,15 @@ On this notice these rights rely.
 
 This library provides two classes: Ngrams, which treats words as tokens
 
-    >>> Ngrams(u"This is a very small donkey.") * Ngrams(u"This animal is a very small donkey.") #doctest:+ELLIPSIS
-    0.771516749810...
+    >>> (Ngrams(u'This is a very small donkey.') *
+    ...  Ngrams(u'This animal is a very small donkey.')) #doctest:+ELLIPSIS
+    0.6708203932...
 
 and CharNgrams, which treats single characters as tokens:
 
-    >>> CharNgrams('supercalifragilistic')*CharNgrams('supercalifragislislistic') #doctest:+ELLIPSIS
-    0.775...
+    >>> (CharNgrams('supercalifragilistic') *
+    ...  CharNgrams('supercalifragislislistic')) #doctest:+ELLIPSIS
+    0.757...
 
 If none of these fits your definition of `token' all you have to do is
 subclass Ngrams and define you own tokenize method.
@@ -40,16 +44,58 @@ with the same value of n.
 """
 import re
 import math
+from collections import defaultdict
+from itertools import tee, izip
+
+
+def n_wise(iterable, n):
+    """Returns n iterators for an iterable that are sequentially
+    n-wise
+
+    """
+    n_iterators = tee(iterable, n)
+    zippables = [n_iterators[0]]
+
+    for advance, iteratee in enumerate(n_iterators[1:]):
+        advance += 1  # since enumerate is 0 indexed.
+        while advance > 0:
+            # we advance the iterator `advance+1` steps
+            next(iteratee, None)
+            advance -= 1
+        # append everything to the zippables
+        zippables.append(iteratee)
+    # return the izip expansion of each iterator
+    return izip(*zippables)
+
 
 class Ngrams(object):
     """Compare strings using an n-grams model and cosine similarity.
 
     This class uses words as tokens. See module docs.
 
+    >>> import pprint
+    >>> items = sorted(Ngrams('Compare strings using an n-grams model and '
+    ...                       'cosine similarity. This class uses words as'
+    ...                       'tokens. See module docs.').d.items())
+    >>> pprint.pprint(items)
+    [('an ngrams model', 0.2581988897471611),
+     ('and cosine similarity', 0.2581988897471611),
+     ('astokens see module', 0.2581988897471611),
+     ('class uses words', 0.2581988897471611),
+     ('compare strings using', 0.2581988897471611),
+     ('cosine similarity this', 0.2581988897471611),
+     ('model and cosine', 0.2581988897471611),
+     ('ngrams model and', 0.2581988897471611),
+     ('see module docs', 0.2581988897471611),
+     ('similarity this class', 0.2581988897471611),
+     ('strings using an', 0.2581988897471611),
+     ('this class uses', 0.2581988897471611),
+     ('uses words astokens', 0.2581988897471611),
+     ('using an ngrams', 0.2581988897471611),
+     ('words astokens see', 0.2581988897471611)]
 
-    >>> sorted(Ngrams('''Compare strings using an n-grams model and cosine similarity. This class uses words as tokens. See module docs.''').d.items())
-    [('an ngrams model', 0.23570226039551587), ('and cosine similarity', 0.23570226039551587), ('as tokens see', 0.23570226039551587), ('class uses words', 0.23570226039551587), ('compare strings using', 0.23570226039551587), ('cosine similarity this', 0.23570226039551587), ('docs', 0.23570226039551587), ('model and cosine', 0.23570226039551587), ('module docs', 0.23570226039551587), ('ngrams model and', 0.23570226039551587), ('see module docs', 0.23570226039551587), ('similarity this class', 0.23570226039551587), ('strings using an', 0.23570226039551587), ('this class uses', 0.23570226039551587), ('tokens see module', 0.23570226039551587), ('uses words as', 0.23570226039551587), ('using an ngrams', 0.23570226039551587), ('words as tokens', 0.23570226039551587)]
     """
+
     ngram_joiner = " "
 
     class WrongN(Exception):
@@ -61,7 +107,7 @@ class Ngrams(object):
     def __init__(self, text, n=3):
         self.n = n
         self.text = text
-        self.d = self.text_to_ngrams(self.text, self.n)
+        self.d = self.text_to_ngrams(self.text)
 
     def __getitem__(self, word):
         return self.d[word]
@@ -78,9 +124,14 @@ class Ngrams(object):
         """
         if self.n != other.n:
             raise self.WrongN
+
+        score = 0
         if self.text == other.text:
-            return 1.0
-        return sum(self[k]*other[k] for k in self if k in other)
+            score = 1.0
+        else:
+            score = sum(self[k] * other[k] for k in self if k in other)
+
+        return score
 
     def __repr__(self):
         return "Ngrams(%r, %r)" % (self.text, self.n)
@@ -89,13 +140,40 @@ class Ngrams(object):
         return self.text
 
     def tokenize(self, text):
-        """Return a sequence of tokens from which the ngrams should be constructed.
+        """Return a sequence of tokens from which the ngrams should be
+        constructed.
 
         This shouldn't be a generator, because its length will be
         needed.
         """
 
-        return re.compile(u'[^\w\n ]|\xe2', re.UNICODE).sub('', text).lower().split()
+        regex = re.compile(u'[^\w\n ]|\xe2', re.UNICODE)
+        return regex.sub('', text).lower().split()
+
+    def relative_n_gram_dist(self, other):
+        """Generates the relative n-gram distance between two strings.
+        The relative n-gram distance can be used as a basis function to
+        determine the similarity of strings.
+
+        The smaller the relative n-gram distance is, the similar the
+        two strings are.
+
+        The formula is:
+                                 |nGram(s1) INTERSECT nGram(s2)|
+         Delta_q(s1, s2) = 1  -  -------------------------------
+                                 |nGram(s1)   UNION   nGram(s2)|
+        """
+        ngrams = set(self.d.keys())
+        other_ngrams = set(other.d.keys())
+        result = None
+        try:
+            result = (1 - (abs(len(ngrams.intersection(other_ngrams))) /
+                           float(abs(len(ngrams.union(other_ngrams))))))
+        except ZeroDivisionError:
+            # I don't know, is there a more graceful way to handle this?
+            raise
+
+        return result
 
     def normalize(self, text):
         """This method is run on the text right before tokenization"""
@@ -104,51 +182,65 @@ class Ngrams(object):
         except AttributeError:
             # text is not a string?
             raise TypeError(text)
-    
+
     def make_ngrams(self, text):
         """
         # -*- coding: utf-8 -*-
         Return an iterator of tokens of which the n-grams will
         consist. You can overwrite this method in subclasses.
 
-        >>> list(Ngrams('').make_ngrams(chr(10).join([u"This work 'as-is' we provide.",\
-        u'No warranty, express or implied.', \
-        u"We've done our best,", \
-        u'to debug and test.',\
-        u'Liability for damages denied.'])))[:5]
-        [u'this work asis', u'work asis we', u'asis we provide', u'we provide no', u'provide no warranty']
+        >>> import pprint
+        >>> L = list(Ngrams('').make_ngrams(chr(10).join([
+        ...         u'This work \\'as-is\\' we provide.',
+        ...         u'No warranty, express or implied.',
+        ...         u'We\\'ve done our best,',
+        ...         u'to debug and test.',
+        ...         u'Liability for damages denied.'])))[:5]
+        >>> pprint.pprint(L)
+        [u'this work asis',
+         u'work asis we',
+         u'asis we provide',
+         u'we provide no',
+         u'provide no warranty']
 
         """
+
         text = self.normalize(text)
         tokens = self.tokenize(text)
-        return (self.ngram_joiner.join(tokens[i:i+self.n]) for i in range(len(tokens)))
+        return (self.ngram_joiner.join(i) for i in n_wise(tokens, self.n))
 
-    def text_to_ngrams(self, text, n=3):
-        d = {}
+    def text_to_ngrams(self, text):
+        counts = defaultdict(int)
+
         for ngram in self.make_ngrams(text):
-            try: d[ngram] += 1
-            except KeyError: d[ngram] = 1
+            counts[ngram] += 1
 
-        norm = math.sqrt(sum(x**2 for x in d.values()))
-        for k, v in d.iteritems():
-            d[k] = v/norm
-        return d
+        norm = math.sqrt(sum(x ** 2 for x in counts.itervalues()))
+
+        for k, v in counts.iteritems():
+            counts[k] = v / norm
+
+        return counts
+
 
 class CharNgrams(Ngrams):
 
     """Ngrams comparison using single characters as tokens.
 
-    >>> CharNgrams("ala ma kota")*CharNgrams("ala ma kota")
+    >>> CharNgrams('ala ma kota')*CharNgrams('ala ma kota')
     1.0
 
-    >>> round(CharNgrams("This Makes No Difference") * CharNgrams("this makes no difference"), 4)
+    >>> round(CharNgrams('This Makes No Difference') *
+    ...       CharNgrams('this makes no difference'), 4)
     1.0
-
-    >>> CharNgrams("Warszawska")*CharNgrams("Warszawa") > CharNgrams("Warszawa")*CharNgrams("Wawa")
+    >>> (CharNgrams('Warszawska')*CharNgrams('Warszawa') >
+    ...  CharNgrams('Warszawa')*CharNgrams('Wawa'))
     True
 
     """
-    ngram_joiner = ''
+
+    ngram_joiner = ""
+
     def tokenize(self, st):
         """
         >>> ''.join(CharNgrams('').tokenize('ala ma kota!'))
@@ -156,16 +248,20 @@ class CharNgrams(Ngrams):
         """
         return [c for c in st if c.isalnum()]
 
+
 class CharNgramSpaces(CharNgrams):
-    '''Like CharNgrams, except it keeps whitespace as one space in
+    """Like CharNgrams, except it keeps whitespace as one space in
     the process of tokenization. This should be useful for analyzing
     texts longer than words, where places at which word boundaries
-    occur may be important.'''
+    occur may be important.
+
+    """
     def tokenize(self, st):
-        return super(CharNgramSpaces, self).tokenize(re.sub(r'\s+', ' ', st))
+        new_st = re.sub(r'\s+', ' ', st)
+        return [c for c in new_st if c.isalnum() or c == " "]
 
 
-if __name__=="__main__":
+if __name__ == '__main__':
     import doctest
     doctest.testmod()
 
